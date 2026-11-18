@@ -5,6 +5,7 @@ import re
 import os
 import time
 import sys
+import json
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -20,7 +21,6 @@ TOPICS = [
 ]
 
 def send_telegram_msg(text):
-    # حيدنا parse_mode باش مايبقاش يخوي الرسالة
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text}
     try:
@@ -30,44 +30,74 @@ def send_telegram_msg(text):
         print(f"Error: {e}")
 
 def send_long_message(text):
-    # كنقطعو على 3500 حرف
     clean = text.replace("*", "").replace("_", "").replace("`", "")
+    if len(clean) < 50:
+        send_telegram_msg("⚠️ Could not fetch full text, open the link above.")
+        return
     chunks = [clean[i:i+3500] for i in range(0, len(clean), 3500)]
     for i, chunk in enumerate(chunks):
         send_telegram_msg(f"📄 Part {i+1}/{len(chunks)}\n\n{chunk}")
         time.sleep(1.5)
 
-def get_full_article_text(url, rss_content=""):
-    # 1. نجربو Jina Reader - هو اللي كيحل مشكل Medium
+def get_from_medium_api(url):
+    # كنجبدو ID ديال المقال من اللينك: مثلا ...-bc1bdbd72a9b
     try:
-        jina_url = f"https://cc.bingj.com/cache.cgi?d=1&w=1&u=https://cc.bingj.com/cache.cgi?d=1&w=1&u=https://r.jina.ai/{url}"
-        # الطريقة الصحيحة:
+        m = re.search(r'-([a-f0-9]{10,})', url)
+        if not m:
+            return None
+        article_id = m.group(1)
+        print(f"Article ID: {article_id}")
+        api_url = f"https://medium.com/_/api/articles/{article_id}"
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+        r = requests.get(api_url, headers=headers, timeout=20)
+        text = r.text
+        # Medium كيزيد هاد السطر فاللول: ]) }while(1);
+        text = text.replace("])}while(1);</x>", "").strip()
+        data = json.loads(text)
+        paragraphs = data["payload"]["value"]["content"]["bodyModel"]["paragraphs"]
+        full = []
+        for p in paragraphs:
+            t = p.get("text", "").strip()
+            if len(t) > 20:
+                full.append(t)
+        result = "\n\n".join(full)
+        print(f"Medium API got {len(result)} chars")
+        return result if len(result) > 500 else None
+    except Exception as e:
+        print(f"Medium API failed: {e}")
+        return None
+
+def get_from_jina(url):
+    try:
         jina_url = f"https://r.jina.ai/{url}"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0", "X-Return-Format": "text"}
         r = requests.get(jina_url, headers=headers, timeout=30)
         text = r.text
-        # كنحيدو الزبل ديال Jina
-        # كناخدو غير النص من بعد العنوان
-        if len(text) > 1000:
-            # حيد أول سطور ديال الميتا
-            lines = [l for l in text.split("\n") if len(l.strip()) > 30]
-            text = "\n\n".join(lines)
-            return text[:18000]
+        # إلا كان فيه "Continue reading" غير بوحدو، راه فشل
+        if len(text) < 1000 or "Continue reading on Medium" in text[:2000] and len(text) < 2000:
+            return None
+        lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 30]
+        # حيد السطور ديال المينيو والروابط
+        lines = [l for l in lines if not l.startswith("http") and "Published in" not in l]
+        return "\n\n".join(lines)[:18000]
     except Exception as e:
         print(f"Jina failed: {e}")
-    
-    # 2. إلا فشل Jina، نجيبو من RSS
-    if rss_content and len(rss_content) > 500:
-        # حيد HTML tags
-        clean = re.sub(r'<[^>]+>', '', rss_content)
-        return clean[:18000]
-    
+        return None
+
+def get_full_article_text(url):
+    # 1. جرب Medium API هو اللول - هو الأفضل
+    t = get_from_medium_api(url)
+    if t:
+        return t[:18000]
+    # 2. جرب Jina
+    t = get_from_jina(url)
+    if t:
+        return t
     return "Could not fetch full article. Please open the link above."
 
 def get_hard_words(text):
     words = re.findall(r'\b[a-zA-Z]{8,}\b', text.lower())
-    # حيد الكلمات العادية
-    stop = {"understanding","different","something","everything","because","through","between","however","therefore","although"}
+    stop = {"understanding","different","something","everything","because","through","between","however","therefore","although","continue","reading"}
     words = [w for w in words if w not in stop]
     unique = list(set(words))
     random.shuffle(unique)
@@ -99,16 +129,9 @@ def morning_task():
         send_telegram_msg("Couldn't find articles today.")
         return
     article = random.choice(feed.entries)
-    # جيب المحتوى ديال RSS كـ backup
-    rss_content = ""
-    if hasattr(article, 'content'):
-        rss_content = article.content[0].value
-    elif hasattr(article, 'summary'):
-        rss_content = article.summary
-
     send_telegram_msg(f"📖 Daily Reading\n\n{article.title}\n\nLink: {article.link}\n\nFetching full article...")
     
-    full_text = get_full_article_text(article.link, rss_content)
+    full_text = get_full_article_text(article.link)
     send_long_message(full_text)
     
     hard = get_hard_words(full_text)
