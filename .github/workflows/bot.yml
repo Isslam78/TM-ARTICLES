@@ -2,8 +2,8 @@ name: Daily Bot
 
 on:
   schedule:
-    - cron: '0 8 * * *'
-    - cron: '0 21 * * *'
+    - cron: '0 2 * * *'   # غادي يوصلك مع 8 ديال الصباح
+    - cron: '0 15 * * *'  # غادي يوصلك مع 21:00 ديال الليل
   workflow_dispatch:
 
 jobs:
